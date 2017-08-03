@@ -1,0 +1,378 @@
+============================
+# Summary:  
+
+* 数据来源：    
+2013-2016普洱市发布的‘拟录用人员公示’和当年云南省发布的‘招考公告-职位表’，两者merge后，四年数据concat的结果。
+* modeling on md1  
+清洗了每个varible，drop面试成绩、综合成绩、排名信息，  
+手动加一栏exam_rk（表示报考同一岗位的考生的笔试成绩排名）后，  
+用其它所有variable来预测是否录取。  
+  * md1TR1:根据accp值来随机划分training set / test set  
+  * md1TR2:由于2013、2016年公示数据只有最终录取的考生；而2014、2015年数据既包含最终录用的，也包含面试被刷的。用2014,2015当training set, 2013 2016当test set，看看模型是否会有不同。  
+
+* modeling on md2
+  * 在md1数据的基础上，手动新增几个var:  
+    * exrk_t: 同岗位笔试成绩排名with tie(method='average')
+    * exrk_ad:岗位招录人数减去exrk_t，用于表示一个考生在排名中占优势还是劣势
+    * exrk_nt:同岗位笔试成绩排名without tie(method='first')
+    * pval: 考生的笔试成绩（已转换为当年z-score）所对应的p value
+    * pval_rel: 考生笔试成绩所对应的p value相对于同一岗位临界考生p value的差值
+      * 注：临界考生：笔试成绩排名=岗位招录人数的那个考生
+  * 两个模型均表现不错，pval_rel是个很有用的变量
+    * md2TR1
+    * md2LG1
+    
+============================
+
+```{r}
+getwd()
+```
+
+# 1 model on df1
+```{r}
+md1 = read.csv('md1.csv')
+str(md1)
+```
+
+```{r}
+# manually drop var with too many levels
+md1$tkt = NULL
+md1$name = NULL 
+md1$school = NULL
+md1$og = NULL
+md1$jc = NULL
+md1$jn = NULL
+```
+
+```{r}
+# manually drop col with NA and col has nonsense
+md1$X = NULL
+md1$rq_other = NULL
+md1$stmt = NULL
+md1$yr = NULL # should drop year because of the inbalance of accp amongst years
+```
+
+
+```{r}
+# manually convert cols to be factor
+md1$gend = as.factor(md1$gend)
+md1$pl = as.factor(md1$pl)
+md1$seat = as.factor(md1$seat)
+md1$accp = as.factor(md1$accp)
+md1$exam_rk = as.factor(md1$exam_rk)
+```
+
+```{r}
+str(md1)
+```
+
+
+```{r}
+library(caTools)
+
+set.seed(99)
+spl = sample.split(md1$accp, 
+                   SplitRatio = 0.7)
+train1 = subset(md1, spl==TRUE)
+test1 = subset(md1, spl==FALSE)
+```
+
+```{r}
+dim(train1)
+dim(test1)
+```
+
+
+```{r}
+# md1TR1 model
+library(rpart)
+library(rpart.plot)
+
+md1TR1 = rpart(accp ~ ., 
+               data=train1,
+               method='class',
+                minbucket=1)
+
+
+prp(md1TR1)
+```
+
+```{r}
+# md1TR1 accu on train 
+md1TR1Tr = predict(md1TR1, type='class')
+table(train1$accp, md1TR1Tr)
+```
+ 
+```{r}
+# md1TR1 accu on train 
+(407+939)/nrow(train1)
+```
+
+```{r}
+# md1TR1 accu on test 
+md1TR1Te = predict(md1TR1, newdata=test1, type='class')
+table(test1$accp, md1TR1Te)
+```
+
+```{r}
+(175+395)/ nrow(test1)
+```
+Almost burst into tears!  High accuracy in both training set and test set!!!  
+The `exam_rk` variable I added appears to be very influential!!!  
+
+```{r}
+# baseline accu on train1 and test1
+max(table(train1$accp)) / nrow(train1)
+max(table(test1$accp)) / nrow(test1)
+```
+
+
+```{r}
+# md1TR1 AUC value
+library(ROCR)
+
+md1TR1ROC = prediction(as.numeric(md1TR1Te), as.numeric(test1$accp))
+as.numeric(performance(md1TR1ROC, "auc")@y.values)
+```
+And a nice AUC score!!!
+
+more on why I add as.numeric(test1$accp) [here](https://stackoverflow.com/questions/40783331/rocr-error-format-of-predictions-is-invalid)
+
+
+```{r}
+# md1TR1 error analysis
+sum((train1$accp==0)&(md1TR1Tr==1))
+sum((train1$accp==1)&(md1TR1Tr==0))
+```
+
+```{r}
+# md1TR1 error analysis
+train1[(train1$accp==0)&(md1TR1Tr==1),]
+```
+
+
+
+Due to the imbalance of `accp` var amongst years,  
+it is better to construct another model that use obs. from only 2014 and 2015 as training data,  
+and obs. from 2013 and 2016 as test data.  
+If the model performs well, it should classify all obs from 2013 as '1', and 227 obs from 2016 as '1', 3 obs from 2016 as '0'.
+```{r}
+md1 = read.csv('md1.csv')
+
+# manually drop var with too many levels
+md1$tkt = NULL
+md1$name = NULL 
+md1$school = NULL
+md1$og = NULL
+md1$jc = NULL
+md1$jn = NULL
+
+# manually drop col with NA and col with no sense
+md1$X = NULL
+md1$rq_other = NULL
+md1$stmt = NULL
+
+# manually convert cols to be factor
+md1$gend = as.factor(md1$gend)
+md1$pl = as.factor(md1$pl)
+md1$seat = as.factor(md1$seat)
+md1$accp = as.factor(md1$accp)
+md1$yr = as.factor(md1$yr)
+md1$exam_rk = as.factor(md1$exam_rk)
+
+str(md1)
+```
+
+```{r}
+train1.2 = subset(md1, yr=='2014' | yr=='2015')
+test1.2 = subset(md1, yr=='2013'| yr=='2016')
+```
+
+
+```{r}
+# md1TR2 model
+library(rpart)
+library(rpart.plot)
+
+md1TR2 = rpart(accp ~ ., 
+               data=train1.2,
+               method='class',
+                minbucket=1)
+prp(md1TR2)
+```
+
+```{r}
+# md1TR2 accu on train 
+md1TR2Tr = predict(md1TR2, type='class')
+table(train1.2$accp, md1TR2Tr)
+```
+```{r}
+# md1TR2 accu on train 
+(605+602) / nrow(train1.2)
+```
+
+```{r}
+# md1TR2 accu on test 
+md1TR2Te = predict(md1TR2, newdata=test1.2, type='class')
+table(test1.2$accp, md1TR2Te)
+```
+
+```{r}
+# md1TR2 accu on test 
+680 / nrow(test1.2)
+```
+HaHa!  A even higher test set accuracy!!! 
+
+```{r}
+test1.2[(test1.2$accp==1)&(md1TR2Te==0),]
+```
+
+# 2 model on md2
+```{r}
+md2 = read.csv('md2.csv')
+str(md2)
+```
+
+```{r}
+md2[,c('X','tkt', 'name', 'school','og', 'jn','jc','rq_other', 'stmt','intv','scr', 'rk')]=NULL
+str(md2)
+```
+
+```{r}
+md2$yr = as.factor(md2$yr)
+md2$gend = as.factor(md2$gend)
+md2$exrk_t = as.factor(md2$exrk_t)
+md2$exrk_nt = as.factor(md2$exrk_nt)
+md2$exrk_ad = as.factor(md2$exrk_ad)
+md2$pl = as.factor(md2$pl)
+md2$seat = as.factor(md2$seat)
+md2$accp = as.factor(md2$accp)
+```
+
+```{r}
+train2.1 = subset(md2, yr=='2014'|yr=='2015')
+test2.1 = subset(md2, yr=='2013'|yr=='2016')
+```
+
+```{r}
+# md2TR1 
+md2TR1 = rpart(accp ~ ., 
+               data=train2.1,
+               method='class',
+                minbucket=1)
+prp(md2TR1)
+```
+
+Adding surname is maybe not a good idea, for it has too many levels. 
+
+```{r}
+# md2TR1 accu on train 
+md2TR1Tr = predict(md2TR1, type='class')
+table(train2.1$accp, md2TR1Tr)
+```
+```{r}
+# md2TR1 accu on train 
+(583+631) / nrow(train2.1)
+```
+   
+
+Slightly better than md2TR1, 
+I did a good job in adding `pval_rel` variable! (Though it's the most time-consuming one)
+
+
+```{r}
+# md2TR1 accu on test
+md2TR1Te = predict(md2TR1,newdata=test2.1,type='class')
+table(test2.1$accp, md2TR1Te)
+```
+```{r}
+# md2TR1 accu on test
+710 / nrow(test2.1)
+```
+  
+Accuracy rate is dizzily high!!!  
+But why it performs even better on training set?  
+Don know.  
+
+Let me try a logistic regression on train2.1 and test2.1.   
+
+```{r}
+# variables that has different levels in test2.1 other than train2.1
+train2.1$yr = NULL
+test2.1$yr = NULL
+
+train2.1$ethnic = NULL
+test2.1$ethnic = NULL
+
+train2.1$exrk_ad = NULL
+test2.1$exrk_ad = NULL
+
+train2.1$rq_id = NULL
+test2.1$rq_id = NULL
+
+train2.1$rq_edu = NULL
+test2.1$rq_edu = NULL
+
+train2.1$rq_dgr = NULL
+test2.1$rq_dgr = NULL
+
+# variables that are least significant
+train2.1$exrk_nt = NULL
+test2.1$exrk_nt = NULL
+
+train2.1$og_cls = NULL
+test2.1$og_cls = NULL
+
+train2.1$rq_pol = NULL
+test2.1$rq_pol = NULL
+```
+
+```{r}
+str(train2.1)
+```
+
+
+```{r}
+# md2LG1 model
+md2LG1 = glm(accp ~., 
+             data=train2.1, 
+             family='binomial')
+summary(md2LG1)
+```
+It seems amazing, all variables are significant. But does this indicates overfitting?  
+
+```{r}
+# md2LG1Tr accu on train
+md2LG1Tr = predict(md2LG1, type='response')
+tapply(md2LG1Tr, train2.1$accp, summary)
+
+qplot(md2LG1Tr, geom='histogram')
+```
+
+```{r}
+# md2LG1Tr accu on train
+table(train2.1$accp, md2LG1Tr > 0.5)
+sum(diag(as.matrix(table(train2.1$accp, md2LG1Tr > 0.5)))) / nrow(train2.1)
+```
+
+
+
+```{r}
+# md2LG1Tr accu on test
+md2LG1Te = predict(md2LG1, newdata=test2.1, type='response')
+tapply(md2LG1Te, test2.1$accp, summary)
+
+qplot(md2LG1Te, geom='histogram')
+```
+
+
+```{r}
+# md2LG1Tr accu on test
+table(test2.1$accp, md2LG1Te > 0.5)
+sum(diag(as.matrix(table(test2.1$accp, md2LG1Te > 0.5)))) / nrow(test2.1)
+```
+
+# 3 
+
+
+
